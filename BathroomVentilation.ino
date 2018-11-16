@@ -1,46 +1,23 @@
-/* How to use the DHT-22 sensor with Arduino uno
-   Temperature and humidity sensor
-*/
 
 //Libraries
-#include <DHT.h>             // Feuchtigkeitsensor
-#include <Adafruit_Sensor.h> // Dependance DHT.h
-//#include <SPI.h>
-//#include <Wire.h>
-//#include <Adafruit_GFX.h>
+#include <DHT.h>              // Feuchtigkeitsensor
+#include <Adafruit_Sensor.h>  // Dependance DHT.h
 #include <Adafruit_SSD1306.h> // OLED Display
 
 // Pins
-#define DHTPIN 5 
-#define OLED_RESET 4
+#define OLED_RESET -1 // Pseudo value, display has no reset pin
+#define DHTPIN 5
 #define RELAIS 7 // Switches ventilation on or off
 #define PLUSBUTTON 8
 #define MINUSBUTTON 9
+#define OFFBUTTON 10
 
 // Other variables
-#define DHTTYPE DHT22 // DHT 22  (AM2302)
+#define DHTTYPE DHT11
 #define LOGO16_GLCD_HEIGHT 16
 #define LOGO16_GLCD_WIDTH 16
 
 Adafruit_SSD1306 display(OLED_RESET);
-
-static const unsigned char PROGMEM logo16_glcd_bmp[] =
-    {B00000000, B11000000,
-     B00000001, B11000000,
-     B00000001, B11000000,
-     B00000011, B11100000,
-     B11110011, B11100000,
-     B11111110, B11111000,
-     B01111110, B11111111,
-     B00110011, B10011111,
-     B00011111, B11111100,
-     B00001101, B01110000,
-     B00011011, B10100000,
-     B00111111, B11100000,
-     B00111111, B11110000,
-     B01111100, B11110000,
-     B01110000, B01110000,
-     B00000000, B00110000};
 
 #if (SSD1306_LCDHEIGHT != 32)
 #error("Height incorrect, please fix Adafruit_SSD1306.h!");
@@ -49,36 +26,45 @@ static const unsigned char PROGMEM logo16_glcd_bmp[] =
 DHT dht(DHTPIN, DHTTYPE); //// Initialize DHT sensor for normal 16mhz Arduino
 
 // Delay and debouncing constants
-#define MINLOOPDURATION 100       // So lange soll eine Loop minimal dauern
-#define DHTMEASUREDELAY 1000      // DHT soll alle so viel Millisekunden messen
-#define DEBOUNCEDELAY 150         // Sollte weniger als die waittime sein.
-#define HUMIDITYTHRESHOLD 80      //above this threshold, ventilation will switch on
-#define PASTTHRESHOLDDELAY 180000 // time in ms that ventilation will stay on after going below threshold
+// #define MINLOOPDURATION 50        // So lange soll eine Loop minimal dauern
+#define DHTMEASUREDELAY 1000       // DHT sensor is slow. 1s yields good results
+#define DEBOUNCEDELAY 200          //
+#define HUMIDITYTHRESHOLD 80       //above this threshold, ventilation will switch on
+#define PASTTHRESHOLDDELAY 180000  // time in ms that ventilation will stay on after going below threshold
 #define VENTILATIONMAXTIME 3600000 // Max time in milliseconds the ventilation can run. Above, timer will reset to 0
-#define BUTTONTIME 60000          // time one plusbutton or minusbutton will add or substract
+#define BUTTONTIME 60000           // time one plusbutton or minusbutton will add or substract
+
 // Variables
 float humidity;
 float temperature;
+bool turnedOff = false;
 unsigned long ventilationStopTimestamp = 0; // timestamp at which ventilation switches off
 unsigned long ventilationRemainingTime = 0; // remaining time ventilation stays on in seconds
-
-unsigned long loopDelayTime = 0;           // delay end of loop so loop duration is at least MINLOOPDURATION
-unsigned long loopStartTimestamp = 0;      // timestamp at which loop started
-unsigned long loopduration = 0;            // time the loop took before delaying
+// unsigned long loopDelayTime = 0;            // delay end of loop so loop duration is at least MINLOOPDURATION
+unsigned long loopStartTimestamp = 0; // timestamp at which loop started
+// unsigned long loopduration = 0;             // time the loop took before delaying
 unsigned long dhtLastMeasureTimestamp = 0; // timestamp at which temperature and humidity was last measured
+unsigned long minutes = 0;
+unsigned long seconds = 0;
 
 // Buttons: HIGH = not pressed, LOW = pressed
 int plusbuttonLastState = HIGH; // Button state on previous loop
 int minusbuttonLastState = HIGH;
+int offbuttonLastState = HIGH;
+
 int plusbuttonReading = HIGH;
 int minusbuttonReading = HIGH;
+int offbuttonReading = HIGH;
 
 //timestamp at which buttons started being pressed for debouncing purposes
 unsigned long plusbuttonLastPressedTimestamp = 0;
 unsigned long minusbuttonLastPressedTimestamp = 0;
+unsigned long offbuttonLastPressedTimestamp = 0;
 
 void printDisplay()
 {
+  minutes = ventilationRemainingTime / 60000;
+  seconds = (ventilationRemainingTime % 60000) / 1000;
   display.setTextColor(WHITE);
   display.setTextSize(1);
   display.setCursor(0, 0);
@@ -88,9 +74,18 @@ void printDisplay()
   display.print("Temp: ");
   display.print(temperature);
   display.println(" Celsius");
-  display.print("Restzeit: ");
-  display.print(ventilationRemainingTime / 1000);
-  display.println(" Sekunden");
+  if (turnedOff)
+  {
+    display.print("OFF");
+  }
+  else
+  {
+    display.print("Restzeit: ");
+    display.print(minutes);
+    display.print("m");
+    display.print(seconds);
+    display.println("s");
+  }
   display.display();
   display.clearDisplay();
 }
@@ -101,6 +96,8 @@ void setup()
   digitalWrite(PLUSBUTTON, HIGH);
   pinMode(MINUSBUTTON, INPUT);
   digitalWrite(MINUSBUTTON, HIGH);
+  pinMode(OFFBUTTON, INPUT);
+  digitalWrite(OFFBUTTON, HIGH);
   pinMode(RELAIS, OUTPUT);
   dht.begin();
   Serial.begin(9600);
@@ -161,10 +158,28 @@ void loop()
     ventilationStopTimestamp = ventilationStopTimestamp - BUTTONTIME;
     minusbuttonLastState = HIGH;
   }
-  
+
+  // Off button
+  offbuttonReading = digitalRead(OFFBUTTON);
+
+  if (offbuttonReading == HIGH)
+  {
+    offbuttonLastState = HIGH;
+  }
+
+  else if (offbuttonReading == LOW && offbuttonLastState == HIGH)
+  {
+    offbuttonLastPressedTimestamp = loopStartTimestamp;
+    offbuttonLastState = LOW;
+  }
+  else if ((loopStartTimestamp - offbuttonLastPressedTimestamp) > DEBOUNCEDELAY)
+  {
+    turnedOff = !turnedOff;
+  }
+
   // Start time calculations
   if (humidity > HUMIDITYTHRESHOLD && ventilationRemainingTime < PASTTHRESHOLDDELAY)
-  { 
+  {
     ventilationStopTimestamp = loopStartTimestamp + PASTTHRESHOLDDELAY;
   }
 
@@ -179,9 +194,13 @@ void loop()
     ventilationRemainingTime = 0;
   }
 
-
-  
   // Start ventilation on or off handling
+  if (turnedOff)
+  {
+    ventilationStopTimestamp = loopStartTimestamp;
+    ventilationRemainingTime = 0;
+  }
+
   if (ventilationRemainingTime > 0)
   {
     digitalWrite(RELAIS, LOW); // Switches ventilation on
@@ -192,13 +211,13 @@ void loop()
   }
 
   // Make loop last at least MINLOOPDURATION
-  loopduration = millis() - loopStartTimestamp;
+  /* loopduration = millis() - loopStartTimestamp;
   loopDelayTime = MINLOOPDURATION - loopduration; // Bufferoverflow if loopduration > MINLOOPDURATION
   if (loopDelayTime > MINLOOPDURATION)            // Catches bufferoverflow
   {
     loopDelayTime = 0;
-  }
+  } */
   printDisplay();
 
-  delay(loopDelayTime);
+  // delay(loopDelayTime);
 }
