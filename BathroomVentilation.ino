@@ -10,17 +10,17 @@
 //#include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h> // OLED Display
 
-//Constants
-#define DHTPIN 5 // what pin we're connected to
+// Pins
+#define DHTPIN 5 
 #define OLED_RESET 4
-#define RELAIS 7
+#define RELAIS 7 // Switches ventilation on or off
+#define PLUSBUTTON 8
+#define MINUSBUTTON 9
+
+// Other variables
 #define DHTTYPE DHT22 // DHT 22  (AM2302)
 #define LOGO16_GLCD_HEIGHT 16
 #define LOGO16_GLCD_WIDTH 16
-
-// Schalter
-#define SCHALTERPLUS 8
-#define SCHALTERMINUS 9
 
 Adafruit_SSD1306 display(OLED_RESET);
 
@@ -48,19 +48,19 @@ static const unsigned char PROGMEM logo16_glcd_bmp[] =
 
 DHT dht(DHTPIN, DHTTYPE); //// Initialize DHT sensor for normal 16mhz Arduino
 
-// Delay and debouncing variables
+// Delay and debouncing constants
 #define MINLOOPDURATION 100       // So lange soll eine Loop minimal dauern
 #define DHTMEASUREDELAY 1000      // DHT soll alle so viel Millisekunden messen
 #define DEBOUNCEDELAY 150         // Sollte weniger als die waittime sein.
 #define HUMIDITYTHRESHOLD 80      //above this threshold, ventilation will switch on
 #define PASTTHRESHOLDDELAY 180000 // time in ms that ventilation will stay on after going below threshold
+#define VENTILATIONMAXTIME 3600000 // Max time in milliseconds the ventilation can run. Above, timer will reset to 0
 #define BUTTONTIME 60000          // time one plusbutton or minusbutton will add or substract
-
 // Variables
 float humidity;
 float temperature;
-unsigned long ventilationTimestampStop = 0; // timestamp at which ventilation switches off
-unsigned long VentilationTimeRemaining = 0; // remaining time ventilation stays on in seconds
+unsigned long ventilationStopTimestamp = 0; // timestamp at which ventilation switches off
+unsigned long ventilationRemainingTime = 0; // remaining time ventilation stays on in seconds
 
 unsigned long loopDelayTime = 0;           // delay end of loop so loop duration is at least MINLOOPDURATION
 unsigned long loopStartTimestamp = 0;      // timestamp at which loop started
@@ -89,7 +89,7 @@ void printDisplay()
   display.print(temperature);
   display.println(" Celsius");
   display.print("Restzeit: ");
-  display.print(VentilationTimeRemaining / 1000);
+  display.print(ventilationRemainingTime / 1000);
   display.println(" Sekunden");
   display.display();
   display.clearDisplay();
@@ -97,10 +97,10 @@ void printDisplay()
 
 void setup()
 {
-  pinMode(SCHALTERPLUS, INPUT);
-  digitalWrite(SCHALTERPLUS, HIGH);
-  pinMode(SCHALTERMINUS, INPUT);
-  digitalWrite(SCHALTERMINUS, HIGH);
+  pinMode(PLUSBUTTON, INPUT);
+  digitalWrite(PLUSBUTTON, HIGH);
+  pinMode(MINUSBUTTON, INPUT);
+  digitalWrite(MINUSBUTTON, HIGH);
   pinMode(RELAIS, OUTPUT);
   dht.begin();
   Serial.begin(9600);
@@ -111,7 +111,7 @@ void loop()
 {
   // We are often using loopStartTimestamp instead of millis() to save cycles
   loopStartTimestamp = millis();
-  // Measure humidity and temperature only every DHTMEASUREDELAY
+  // Measure humidity and temperature only every DHTMEASUREDELAY ms
   if ((loopStartTimestamp - dhtLastMeasureTimestamp) > DHTMEASUREDELAY)
   {
     Serial.print("Measuring!");
@@ -121,9 +121,9 @@ void loop()
     dhtLastMeasureTimestamp = loopStartTimestamp;
   }
 
-  // Buttonzeugs mit Debouncing
-  // Plusschalter
-  plusbuttonReading = digitalRead(SCHALTERPLUS); //LOW = Pressed
+  // Start buttonhandling
+  // Plus button
+  plusbuttonReading = digitalRead(PLUSBUTTON); //LOW = Pressed
 
   if (plusbuttonReading == HIGH)
   {
@@ -138,12 +138,12 @@ void loop()
 
   else if ((loopStartTimestamp - plusbuttonLastPressedTimestamp) > DEBOUNCEDELAY && plusbuttonReading == LOW && plusbuttonLastState == LOW)
   {
-    ventilationTimestampStop = ventilationTimestampStop + BUTTONTIME;
+    ventilationStopTimestamp = ventilationStopTimestamp + BUTTONTIME;
     plusbuttonLastState = HIGH;
   }
 
-  // Minusschalter
-  minusbuttonReading = digitalRead(SCHALTERMINUS);
+  // Minus button
+  minusbuttonReading = digitalRead(MINUSBUTTON);
 
   if (minusbuttonReading == HIGH)
   {
@@ -158,42 +158,47 @@ void loop()
 
   else if ((loopStartTimestamp - minusbuttonLastPressedTimestamp) > DEBOUNCEDELAY && minusbuttonReading == LOW && minusbuttonLastState == LOW)
   {
-    ventilationTimestampStop = ventilationTimestampStop - BUTTONTIME;
+    ventilationStopTimestamp = ventilationStopTimestamp - BUTTONTIME;
     minusbuttonLastState = HIGH;
   }
-  // Ende Buttonzeugs
+  
+  // Start time calculations
+  if (humidity > HUMIDITYTHRESHOLD && ventilationRemainingTime < PASTTHRESHOLDDELAY)
+  { 
+    ventilationStopTimestamp = loopStartTimestamp + PASTTHRESHOLDDELAY;
+  }
 
-  // Verbleibende Zeit ausrechnen.
-  if (ventilationTimestampStop > loopStartTimestamp && VentilationTimeRemaining < 10000000) // Sometimes, minus button can cause overflow. We correct this here.
+  //Sometimes, minus button can cause overflow. We correct this with clause "ventilationRemainingTime < VENTILATIONMAXTIME)"
+  if (ventilationStopTimestamp > loopStartTimestamp && ventilationRemainingTime < VENTILATIONMAXTIME)
   {
-    VentilationTimeRemaining = ventilationTimestampStop - loopStartTimestamp;
+    ventilationRemainingTime = ventilationStopTimestamp - loopStartTimestamp;
   }
   else
   {
-    ventilationTimestampStop = loopStartTimestamp;
-    VentilationTimeRemaining = 0;
+    ventilationStopTimestamp = loopStartTimestamp;
+    ventilationRemainingTime = 0;
   }
 
-  // Auswerten und reagieren
-  if (humidity > HUMIDITYTHRESHOLD && VentilationTimeRemaining < PASTTHRESHOLDDELAY)
-  { // Wenn Feuchtigkeit über HUMIDITYTHRESHOLD Prozent und Zeit weniger als 3 Minuten ist, Zeit auf 3 Minuten setzen.
-    ventilationTimestampStop = loopStartTimestamp + PASTTHRESHOLDDELAY;
-  }
-  if (VentilationTimeRemaining > 0)
-  { //Lueftung anschalten
-    digitalWrite(RELAIS, LOW);
+
+  
+  // Start ventilation on or off handling
+  if (ventilationRemainingTime > 0)
+  {
+    digitalWrite(RELAIS, LOW); // Switches ventilation on
   }
   else
   {
     digitalWrite(RELAIS, HIGH);
   }
-  loopduration = millis() - loopStartTimestamp;   //loopduration = Millisekunden, die die Loop gedauert hat.
-  loopDelayTime = MINLOOPDURATION - loopduration; // Bufferoverflow wenn loopduration > MINLOOPDURATION
-  if (loopDelayTime > MINLOOPDURATION)            // Falls Bufferoverflow, reset
+
+  // Make loop last at least MINLOOPDURATION
+  loopduration = millis() - loopStartTimestamp;
+  loopDelayTime = MINLOOPDURATION - loopduration; // Bufferoverflow if loopduration > MINLOOPDURATION
+  if (loopDelayTime > MINLOOPDURATION)            // Catches bufferoverflow
   {
     loopDelayTime = 0;
   }
   printDisplay();
 
-  delay(loopDelayTime); //MINLOOPDURATION - loopduration = Anzahl Millisekunden, die noch gewartet werden muss.
+  delay(loopDelayTime);
 }
